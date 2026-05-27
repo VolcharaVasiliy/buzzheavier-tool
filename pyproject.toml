@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "buzzheavier-tool"
+version = "0.1.0"
+description = "CLI uploader and downloader for Buzzheavier."
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+    "requests>=2.31",
+]
+keywords = ["buzzheavier", "cli", "upload", "download"]
+classifiers = [
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Internet :: File Transfer Protocol (FTP)",
+]
+
+[project.scripts]
+buzzheavier-tool = "buzzheavier_tool:main"
+
+[tool.setuptools]
+py-modules = ["buzzheavier_tool"]
