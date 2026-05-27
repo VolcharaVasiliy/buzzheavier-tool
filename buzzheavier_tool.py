@@ -60,6 +60,9 @@ USER_AGENT = "Buzzheavier Tool"
 SPINNER_FRAMES = ["|", "/", "-", "\\"]
 MENU_POINTER = ">"
 PART_SUFFIX = ".part"
+WRAPPING_QUOTES = "\"'“”‘’"
+MIRROR_LATENCY_ATTEMPTS = 3
+MIRROR_LATENCY_PATH = "/api/locations"
 
 OFFICIAL_SITE_HOST = "buzzheavier.com"
 SITE_HOSTS = [
@@ -85,6 +88,13 @@ SITE_HOST_MENU_ITEMS = [
     {"label": "buzzheavier.com", "value": "buzzheavier.com"},
     {"label": "bzzhr.co", "value": "bzzhr.co"},
     {"label": "fuckingfast.net", "value": "fuckingfast.net"},
+]
+
+UPLOAD_PART_SIZE_MENU_ITEMS = [
+    {"label": "50 MiB", "value": "50MiB", "hint": "Balanced"},
+    {"label": "100 MiB", "value": "100MiB", "hint": "Fewer parts"},
+    {"label": "Auto", "value": "__auto__", "hint": "Size from file/workers"},
+    {"label": "Custom value", "value": "__custom__", "hint": "Type manually"},
 ]
 
 LOCATION_MAP = {
@@ -229,6 +239,17 @@ def color_bool(enabled):
     return color("ON", Ansi.GREEN + Ansi.BOLD) if enabled else color("OFF", Ansi.DIM)
 
 
+def color_latency(ms):
+    if ms is None:
+        return color("failed", Ansi.RED + Ansi.BOLD)
+    text = "{0:.0f} ms".format(ms)
+    if ms <= 180:
+        return color(text, Ansi.GREEN + Ansi.BOLD)
+    if ms <= 450:
+        return color(text, Ansi.YELLOW + Ansi.BOLD)
+    return color(text, Ansi.RED + Ansi.BOLD)
+
+
 def color_path(path):
     return color(path, Ansi.CYAN + Ansi.BOLD)
 
@@ -253,6 +274,15 @@ def print_banner():
 def safe_remove_file(path):
     if path and os.path.exists(path):
         os.remove(path)
+
+
+def unwrap_drag_drop_value(value):
+    if value is None:
+        return None
+    text = str(value).strip()
+    while len(text) >= 2 and text[0] in WRAPPING_QUOTES and text[-1] in WRAPPING_QUOTES:
+        text = text[1:-1].strip()
+    return text
 
 
 def is_retryable_download_error(exc):
@@ -289,7 +319,7 @@ def can_read_single_key():
 
 def safe_input(prompt, default=None, allow_empty=False):
     try:
-        value = input(prompt).strip()
+        value = unwrap_drag_drop_value(input(prompt))
     except EOFError:
         if default is not None:
             return default
@@ -380,10 +410,10 @@ def format_worker_text(requested_workers, active_workers):
     return "{0} active ({1} requested)".format(active_workers, requested_workers)
 
 
-def confirm_download_start(file_id, filename, total, output_file, threads, use_proxy, selected_site_host="auto", resolved_site_host=None):
+def confirm_download_start(source_ref, filename, total, output_file, threads, use_proxy, selected_site_host="auto", resolved_site_host=None, source_label="File id"):
     if not can_read_single_key():
         print("Ready to download:")
-        print("  File id: {0}".format(file_id))
+        print("  {0}: {1}".format(source_label, source_ref))
         print("  Name: {0}".format(filename))
         print("  Size: {0}".format(fmt_bytes(total)))
         print("  Output: {0}".format(output_file))
@@ -398,7 +428,7 @@ def confirm_download_start(file_id, filename, total, output_file, threads, use_p
         print_banner()
         print(color("Download Preview", Ansi.WHITE + Ansi.BOLD))
         print("")
-        print("  {0} {1}".format(color("File id:", Ansi.YELLOW), file_id))
+        print("  {0} {1}".format(color(source_label + ":", Ansi.YELLOW), source_ref))
         print("  {0} {1}".format(color("Name:", Ansi.YELLOW), filename))
         print("  {0} {1}".format(color("Size:", Ansi.YELLOW), fmt_bytes(total)))
         print("  {0} {1}".format(color("Output:", Ansi.YELLOW), color_path(output_file)))
@@ -443,6 +473,28 @@ def choose_site_host(default_value="auto"):
     if not can_read_single_key():
         return prompt_text("Service host", default_value)
     return choose_menu_option("Service Host", SITE_HOST_MENU_ITEMS, selected_value=default_value)
+
+
+def choose_upload_part_size(default_value=None):
+    if not can_read_single_key():
+        raw = prompt_text("Part size (50MiB, 100MiB, custom, auto)", default_value or "50MiB", allow_empty=True)
+        raw = unwrap_drag_drop_value(raw)
+        if not raw or raw.lower() in ("auto", "a", "default"):
+            return None
+        return raw
+
+    selected = choose_menu_option("Upload Part Size", UPLOAD_PART_SIZE_MENU_ITEMS, selected_value=default_value or "50MiB")
+    if selected == "__auto__":
+        return None
+    if selected != "__custom__":
+        return selected
+
+    clear_screen()
+    print_banner()
+    print(color("Custom Part Size", Ansi.WHITE + Ansi.BOLD))
+    print("")
+    value = prompt_text("Part size, e.g. 25MiB or 75MiB")
+    return unwrap_drag_drop_value(value)
 
 
 def upload_target_text(login_id, parent_id):
@@ -768,6 +820,18 @@ def response_message(response):
     return text.strip()
 
 
+def response_is_downloadable(response):
+    content_type = (response.headers.get("Content-Type") or response.headers.get("content-type") or "").lower()
+    disposition = response.headers.get("Content-Disposition") or response.headers.get("content-disposition") or ""
+    if "attachment" in disposition.lower() or "filename" in disposition.lower():
+        return True
+    if response.status_code == 206:
+        return True
+    if content_type.startswith("text/html") or "application/xhtml" in content_type:
+        return False
+    return response.status_code == 200
+
+
 def resolve_location(value):
     if not value:
         return None
@@ -808,35 +872,72 @@ def describe_site_host(selected_site_host, resolved_site_host=None):
     return selected
 
 
-def probe_site_host(site_host, use_proxy=False):
+def measure_site_host_latency(site_host, use_proxy=False, attempts=MIRROR_LATENCY_ATTEMPTS, announce=False):
     ensure_requests_available()
-    response = None
-    try:
-        response = requests.get(
-            "https://{0}/api/locations".format(site_host),
-            headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
-            proxies=get_requests_proxies(use_proxy),
-            timeout=(4, 6),
-            allow_redirects=True,
+    samples = []
+    errors = []
+    for attempt in range(1, attempts + 1):
+        response = None
+        try:
+            started = time.perf_counter()
+            response = requests.get(
+                "https://{0}{1}".format(site_host, MIRROR_LATENCY_PATH),
+                headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
+                proxies=get_requests_proxies(use_proxy),
+                timeout=(4, 6),
+                allow_redirects=True,
+            )
+            elapsed_ms = (time.perf_counter() - started) * 1000.0
+            if response.status_code >= 400:
+                raise RuntimeError("HTTP {0} {1}".format(response.status_code, response.reason))
+            data = json.loads(response.content.decode("utf-8"))
+            if not isinstance(data, dict):
+                raise RuntimeError("Invalid API response")
+            samples.append(elapsed_ms)
+        except Exception as exc:
+            errors.append("{0}: {1}".format(type(exc).__name__, exc))
+        finally:
+            if response is not None:
+                response.close()
+    best_ms = min(samples) if samples else None
+    result = {
+        "host": site_host,
+        "samples": samples,
+        "best_ms": best_ms,
+        "ok": bool(samples),
+        "error": errors[-1] if errors else None,
+    }
+    if announce:
+        sample_text = ", ".join("{0:.0f}".format(v) for v in samples) if samples else "failed"
+        finish_line(
+            "Mirror {0}: best {1} [{2}]".format(site_host, color_latency(best_ms), sample_text),
+            None,
         )
-        if response.status_code >= 400:
-            return False
-        data = json.loads(response.content.decode("utf-8"))
-        return isinstance(data, dict)
-    except Exception:
-        return False
-    finally:
-        if response is not None:
-            response.close()
+    return result
+
+
+def probe_site_host(site_host, use_proxy=False):
+    return measure_site_host_latency(site_host, use_proxy=use_proxy, attempts=1).get("ok", False)
 
 
 def resolve_site_host(selected_site_host="auto", use_proxy=False):
     selected = normalize_site_host(selected_site_host)
     if selected != "auto":
         return selected
-    for site_host in SITE_HOSTS:
-        if probe_site_host(site_host, use_proxy=use_proxy):
-            return site_host
+    finish_line("Measuring mirror latency ({0} tries each)...".format(MIRROR_LATENCY_ATTEMPTS), Ansi.CYAN if supports_color() else None)
+    results = [
+        measure_site_host_latency(site_host, use_proxy=use_proxy, attempts=MIRROR_LATENCY_ATTEMPTS, announce=True)
+        for site_host in SITE_HOSTS
+    ]
+    successful = [item for item in results if item["ok"]]
+    if successful:
+        selected_result = min(successful, key=lambda item: item["best_ms"])
+        finish_line(
+            "Selected mirror: {0} ({1})".format(selected_result["host"], color_latency(selected_result["best_ms"])),
+            Ansi.GREEN + Ansi.BOLD if supports_color() else None,
+        )
+        return selected_result["host"]
+    finish_line("All mirror probes failed, falling back to {0}.".format(OFFICIAL_SITE_HOST), Ansi.YELLOW if supports_color() else None)
     return OFFICIAL_SITE_HOST
 
 
@@ -1135,7 +1236,7 @@ def direct_url_metadata(redirect, use_proxy=False):
                     proxies=get_requests_proxies(mode),
                     timeout=(8, NETWORK_IO_TIMEOUT),
                     allow_redirects=True,
-                    stream=False,
+                    stream=(method == "GET"),
                 )
                 if response.status_code not in (200, 206):
                     last_error = "Unexpected metadata response via {0}: HTTP {1} {2}".format(label, response.status_code, response.reason)
@@ -1159,6 +1260,37 @@ def direct_url_metadata(redirect, use_proxy=False):
                     pass
 
     raise RuntimeError("Could not determine metadata for downloadable URL: {0}. Last error: {1}".format(redirect, last_error))
+
+
+def resolve_direct_download_url(url, use_proxy=False):
+    ensure_requests_available()
+    redirect_parts = urlsplit(url)
+    if not redirect_parts.scheme or not redirect_parts.netloc:
+        raise RuntimeError("Invalid direct URL: {0}".format(url))
+    last_error = None
+    for mode, label in choose_host_connection_attempts(redirect_parts.netloc, use_proxy):
+        response = None
+        try:
+            response = requests.get(
+                url,
+                headers={"User-Agent": USER_AGENT, "Range": "bytes=0-0"},
+                proxies=get_requests_proxies(mode),
+                timeout=(8, NETWORK_IO_TIMEOUT),
+                allow_redirects=True,
+                stream=True,
+            )
+            if response.status_code not in (200, 206):
+                last_error = "HTTP {0} {1} via {2}".format(response.status_code, response.reason, label)
+                continue
+            if response_is_downloadable(response):
+                return response.url
+            last_error = "URL returned a page, not a file, via {0}".format(label)
+        except Exception as exc:
+            last_error = "{0} via {1}: {2}".format(type(exc).__name__, label, exc)
+        finally:
+            if response is not None:
+                response.close()
+    raise RuntimeError("Direct URL is not downloadable: {0}. Last error: {1}".format(url, last_error))
 
 
 def probe_range_support(redirect_parts, use_proxy=False):
@@ -1573,24 +1705,44 @@ def download_with_ranges(redirect_parts, filename, total, output_file, threads, 
 
 
 def download_file(file_id_or_url, output_dir, output_path=None, threads=DEFAULT_DOWNLOAD_THREADS, use_proxy=False, site_host="auto"):
-    if file_id_or_url:
-        file_id_or_url = file_id_or_url.strip().strip('\'"').strip()
-    if output_dir:
-        output_dir = output_dir.strip().strip('\'"').strip()
-    if output_path:
-        output_path = output_path.strip().strip('\'"').strip()
-    file_id = parse_url_or_id(file_id_or_url)
-    resolved_site_host = resolve_site_host(site_host, use_proxy=use_proxy)
-    redirect = resolve_download_target(file_id, use_proxy=use_proxy, site_host=resolved_site_host)
+    file_id_or_url = unwrap_drag_drop_value(file_id_or_url)
+    output_dir = unwrap_drag_drop_value(output_dir)
+    output_path = unwrap_drag_drop_value(output_path)
+    if not file_id_or_url:
+        raise RuntimeError("File URL or id is required.")
+
+    source_label = "File id"
+    resolved_site_host = None
+    if file_id_or_url.startswith("http://") or file_id_or_url.startswith("https://"):
+        source_label = "URL"
+        try:
+            redirect = resolve_direct_download_url(file_id_or_url, use_proxy=use_proxy)
+        except Exception as direct_exc:
+            file_id = parse_url_or_id(file_id_or_url)
+            resolved_site_host = resolve_site_host(site_host, use_proxy=use_proxy)
+            finish_line(
+                "Direct URL fallback failed: {0}".format(direct_exc),
+                Ansi.YELLOW if supports_color() else None,
+            )
+            redirect = resolve_download_target(file_id, use_proxy=use_proxy, site_host=resolved_site_host)
+            source_label = "File id"
+            file_id_or_url = file_id
+    else:
+        file_id = parse_url_or_id(file_id_or_url)
+        resolved_site_host = resolve_site_host(site_host, use_proxy=use_proxy)
+        redirect = resolve_download_target(file_id, use_proxy=use_proxy, site_host=resolved_site_host)
+
     redirect_parts, filename, total = direct_url_metadata(redirect, use_proxy=use_proxy)
+    progress_host = resolved_site_host or redirect_parts.netloc
     if output_path:
         final_path = output_path
     else:
+        output_dir = output_dir or DEFAULT_DOWNLOAD_DIR
         final_path = os.path.join(output_dir, filename)
-    if not confirm_download_start(file_id, filename, total, final_path, threads, use_proxy, selected_site_host=site_host, resolved_site_host=resolved_site_host):
+    if not confirm_download_start(file_id_or_url, filename, total, final_path, threads, use_proxy, selected_site_host=site_host, resolved_site_host=resolved_site_host, source_label=source_label):
         finish_line("Download cancelled before start.", Ansi.YELLOW + Ansi.BOLD if supports_color() else None)
         raise DownloadCancelled("Download cancelled before start.")
-    return download_with_ranges(redirect_parts, filename, total, final_path, threads, use_proxy=use_proxy, resolved_site_host=resolved_site_host)
+    return download_with_ranges(redirect_parts, filename, total, final_path, threads, use_proxy=use_proxy, resolved_site_host=progress_host)
 
 
 def fetch_root_directory_id(login_id, use_proxy=False, site_host=OFFICIAL_SITE_HOST):
@@ -2232,8 +2384,11 @@ def upload_once(path, login_id=None, parent_id=None, location_id=None, note=None
 
 
 def upload_file(path, login_id=None, parent_id=None, location_id=None, note=None, name=None, use_proxy=False, staged=False, workers=DEFAULT_UPLOAD_WORKERS, part_size=None, site_host="auto"):
-    if path:
-        path = path.strip().strip('\'"').strip()
+    path = unwrap_drag_drop_value(path)
+    name = unwrap_drag_drop_value(name)
+    parent_id = unwrap_drag_drop_value(parent_id)
+    location_id = unwrap_drag_drop_value(location_id)
+    part_size = unwrap_drag_drop_value(part_size)
     if not os.path.isfile(path):
         raise RuntimeError("File not found: {0}".format(path))
     file_size = os.path.getsize(path)
@@ -2355,10 +2510,11 @@ def interactive_prompt():
         note = prompt_text("Note [optional]", "", allow_empty=True) or None
         location = choose_upload_location(DEFAULT_UPLOAD_LOCATION)
         upload_workers_raw = prompt_text("Upload workers", str(DEFAULT_UPLOAD_WORKERS))
+        part_size = choose_upload_part_size("50MiB")
         site_host = choose_site_host("auto")
         use_proxy = prompt_yes_no("Proxy on?", False)
         upload_workers = int(upload_workers_raw) if upload_workers_raw else DEFAULT_UPLOAD_WORKERS
-        upload_file(path, login_id=login_id, parent_id=parent_id, location_id=location, note=note, use_proxy=use_proxy, workers=upload_workers, site_host=site_host)
+        upload_file(path, login_id=login_id, parent_id=parent_id, location_id=location, note=note, use_proxy=use_proxy, workers=upload_workers, part_size=part_size, site_host=site_host)
         maybe_pause(True)
         return 0
     raise RuntimeError("Unknown menu choice: {0}".format(choice))
@@ -2413,9 +2569,9 @@ def main(argv=None):
 
     if args.command == "download":
         download_file(
-            args.file,
-            args.output_dir,
-            args.output_file,
+            unwrap_drag_drop_value(args.file),
+            unwrap_drag_drop_value(args.output_dir),
+            unwrap_drag_drop_value(args.output_file),
             threads=args.threads,
             use_proxy=(args.proxy == "on"),
             site_host=args.site_host,
@@ -2424,16 +2580,16 @@ def main(argv=None):
         return 0
     if args.command == "upload":
         upload_file(
-            args.path,
-            login_id=args.login_id,
-            parent_id=args.parent_id,
-            location_id=args.location_id,
-            note=args.note,
-            name=args.name,
+            unwrap_drag_drop_value(args.path),
+            login_id=unwrap_drag_drop_value(args.login_id),
+            parent_id=unwrap_drag_drop_value(args.parent_id),
+            location_id=unwrap_drag_drop_value(args.location_id),
+            note=unwrap_drag_drop_value(args.note),
+            name=unwrap_drag_drop_value(args.name),
             use_proxy=(args.proxy == "on"),
             staged=args.staged_upload,
             workers=args.upload_workers,
-            part_size=args.upload_part_size,
+            part_size=unwrap_drag_drop_value(args.upload_part_size),
             site_host=args.site_host,
         )
         maybe_pause(args.stay_open)

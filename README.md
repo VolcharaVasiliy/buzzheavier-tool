@@ -6,9 +6,10 @@ Buzzheavier Tool is a standalone Windows executable and Python CLI for uploading
 
 - Interactive terminal menu for upload and download workflows.
 - Multi-threaded downloads with resume, retry, cancellation, and `*.part` staging.
+- Direct-download URL support for already-resolved file links.
 - Multipart uploads with configurable workers and part size.
 - Anonymous uploads and authenticated uploads with `--login-id`.
-- Buzzheavier mirror selection with `--site-host auto`.
+- Buzzheavier mirror selection with `--site-host auto` and three latency checks per mirror.
 - Optional use of the current Windows system proxy.
 - PyInstaller build script for a standalone Windows executable.
 
@@ -49,10 +50,11 @@ Upload with authentication and a target parent folder:
 python buzzheavier_tool.py --proxy on upload <file-path> --login-id <token> --parent-id <dir-id>
 ```
 
-Tune multipart upload concurrency:
+Tune multipart upload concurrency and part size:
 
 ```bat
-python buzzheavier_tool.py upload <file-path> --upload-workers 5 --upload-part-size 25MiB
+python buzzheavier_tool.py upload <file-path> --upload-workers 5 --upload-part-size 50MiB
+python buzzheavier_tool.py upload <file-path> --upload-workers 5 --upload-part-size 100MiB
 ```
 
 ## Command Reference
@@ -61,7 +63,7 @@ Global options:
 
 - `--threads <n>`: download worker count, default `8`.
 - `--proxy off|on`: use the current Windows system proxy for this run.
-- `--site-host auto|buzzheavier.com|bzzhr.co|fuckingfast.net`: Buzzheavier host or mirror.
+- `--site-host auto|buzzheavier.com|bzzhr.co|fuckingfast.net`: Buzzheavier host or mirror. `auto` measures each mirror three times and selects the lowest latency.
 - `--stay-open`: wait for input before closing the console.
 - `--staged-upload`: upload under a temporary remote name and rename after success.
 
@@ -74,10 +76,12 @@ python buzzheavier_tool.py download <file-url-or-id> [-o <output-dir>] [-f <outp
 Upload:
 
 ```bat
-python buzzheavier_tool.py upload <file-path> [--login-id <token>] [--parent-id <dir-id>] [--location-id <location>] [--note <text>] [--name <remote-name>]
+python buzzheavier_tool.py upload <file-path> [--login-id <token>] [--parent-id <dir-id>] [--location-id <location>] [--note <text>] [--name <remote-name>] [--upload-part-size 50MiB|100MiB|custom]
 ```
 
 Location aliases include `eastern_europe`, `central_europe`, `western_europe`, `us_east`, `us_west`, and `apac`.
+
+Windows drag-and-drop paths wrapped in quotes are accepted for local file paths and output paths.
 
 ## Build Windows EXE
 
