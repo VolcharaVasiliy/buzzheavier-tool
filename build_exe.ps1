@@ -29,7 +29,15 @@ function Ensure-Directory {
     }
 }
 
-if (-not (Test-Path -LiteralPath $PythonExe)) {
+function Test-Command {
+    param([string]$Command)
+    if (Test-Path -LiteralPath $Command) {
+        return $true
+    }
+    return [bool](Get-Command $Command -ErrorAction SilentlyContinue)
+}
+
+if (-not (Test-Command -Command $PythonExe)) {
     throw "Python runtime not found: $PythonExe"
 }
 
@@ -43,6 +51,11 @@ Ensure-Directory -Path $PyInstallerRoot
 Ensure-Directory -Path $DistRoot
 Ensure-Directory -Path $BuildRoot
 Ensure-Directory -Path $SpecRoot
+
+$LegacyProxyWrapper = Join-Path $DistRoot "BuzzheavierTool-proxy.bat"
+if (Test-Path -LiteralPath $LegacyProxyWrapper) {
+    Remove-Item -LiteralPath $LegacyProxyWrapper -Force
+}
 
 if (-not (Test-Path -LiteralPath $PyInstallerMain)) {
     & $PythonExe -m pip install --upgrade --target $PyInstallerRoot pyinstaller requests
@@ -67,18 +80,5 @@ $env:PYTHONPATH = $PyInstallerRoot
     --collect-data certifi `
     $MainScript
 
-$ProxyWrapper = Join-Path $DistRoot "BuzzheavierTool-proxy.bat"
-@"
-@echo off
-setlocal
-title Buzzheavier Tool [proxy]
-"%~dp0BuzzheavierTool.exe" --proxy on %*
-echo.
-echo Press any key to close...
-pause >nul
-endlocal
-"@ | Set-Content -Path $ProxyWrapper -Encoding ASCII
-
 Write-Host "Built:"
 Write-Host "  $DistRoot\BuzzheavierTool.exe"
-Write-Host "  $ProxyWrapper"

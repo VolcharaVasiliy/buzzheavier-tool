@@ -1,6 +1,6 @@
 # Buzzheavier Tool
 
-Buzzheavier Tool is a Windows-friendly Python CLI for uploading files to and downloading files from Buzzheavier.
+Buzzheavier Tool is a standalone Windows executable and Python CLI for uploading files to and downloading files from Buzzheavier.
 
 ## Features
 
@@ -17,7 +17,7 @@ Buzzheavier Tool is a Windows-friendly Python CLI for uploading files to and dow
 - Python 3.8 or newer.
 - `requests` for network transfers.
 
-Install dependencies:
+Install dependencies when running from source:
 
 ```bat
 python -m pip install -r requirements.txt
@@ -53,13 +53,6 @@ Tune multipart upload concurrency:
 
 ```bat
 python buzzheavier_tool.py upload <file-path> --upload-workers 5 --upload-part-size 25MiB
-```
-
-Windows launcher scripts are also included:
-
-```bat
-run.bat
-run_proxy.bat
 ```
 
 ## Command Reference

@@ -29,6 +29,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: BuzzheavierTool-windows
-          path: |
-            dist/BuzzheavierTool.exe
-            dist/BuzzheavierTool-proxy.bat
+          path: dist/BuzzheavierTool.exe
