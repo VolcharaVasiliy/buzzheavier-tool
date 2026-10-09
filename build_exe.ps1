@@ -58,7 +58,7 @@ if (Test-Path -LiteralPath $LegacyProxyWrapper) {
 }
 
 if (-not (Test-Path -LiteralPath $PyInstallerMain)) {
-    & $PythonExe -m pip install --upgrade --target $PyInstallerRoot pyinstaller requests
+    & $PythonExe -m pip install --upgrade --target $PyInstallerRoot pyinstaller requests curl_cffi
 }
 
 $env:PYTHONPATH = $PyInstallerRoot
@@ -75,6 +75,8 @@ $env:PYTHONPATH = $PyInstallerRoot
     --specpath $SpecRoot `
     --paths $PyInstallerRoot `
     --collect-submodules requests `
+    --collect-submodules curl_cffi `
+    --collect-binaries curl_cffi `
     --collect-submodules urllib3 `
     --collect-submodules charset_normalizer `
     --collect-data certifi `

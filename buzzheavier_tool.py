@@ -36,8 +36,56 @@ if os.path.isdir(VENDOR_DIR) and VENDOR_DIR not in sys.path:
     sys.path.insert(0, VENDOR_DIR)
 
 try:
-    import requests
+    import requests as plain_requests
 except ImportError:
+    plain_requests = None
+
+try:
+    from curl_cffi import requests as impersonating_requests
+except ImportError:
+    impersonating_requests = None
+
+
+class HttpClient(object):
+    def __init__(self, backend, extra_kwargs, exception_types):
+        self.backend = backend
+        self.extra_kwargs = extra_kwargs
+        self.RequestException = exception_types
+
+    def request(self, method, url, **kwargs):
+        kwargs = dict(self.extra_kwargs, **kwargs)
+        response = self.backend.request(method, url, **kwargs)
+        if not hasattr(response, "reason"):
+            try:
+                response.reason = http.HTTPStatus(response.status_code).phrase
+            except ValueError:
+                response.reason = ""
+        return response
+
+    def get(self, url, **kwargs):
+        return self.request("GET", url, **kwargs)
+
+    def head(self, url, **kwargs):
+        return self.request("HEAD", url, **kwargs)
+
+    def post(self, url, **kwargs):
+        return self.request("POST", url, **kwargs)
+
+    def put(self, url, **kwargs):
+        return self.request("PUT", url, **kwargs)
+
+    def patch(self, url, **kwargs):
+        return self.request("PATCH", url, **kwargs)
+
+
+if impersonating_requests is not None:
+    _exception_types = (impersonating_requests.RequestsError,)
+    if plain_requests is not None:
+        _exception_types += (plain_requests.RequestException,)
+    requests = HttpClient(impersonating_requests.Session(impersonate="chrome"), {}, _exception_types)
+elif plain_requests is not None:
+    requests = HttpClient(plain_requests, {}, (plain_requests.RequestException,))
+else:
     requests = None
 
 
@@ -1163,13 +1211,43 @@ def resolve_download_target(file_id, use_proxy=False, site_host=OFFICIAL_SITE_HO
             Ansi.GREEN if supports_color() else None,
         )
     last_error = None
-    for attempt in range(1, 6):
+    for attempt in range(1, 3):
         for mode in choose_proxy_modes(use_proxy):
             try:
                 label = "proxy" if mode else "direct"
                 finish_line(
-                    "Resolving file id: {0} [{1} alt try {2}]".format(file_id, label, attempt),
+                    "Resolving file id: {0} [{1} std try {2}]".format(file_id, label, attempt),
                     Ansi.CYAN if supports_color() else None,
+                )
+                status, reason, headers = request_download_redirect(file_id, False, token=token, use_proxy=mode, site_host=site_host)
+                redirect = headers.get("Hx-Redirect") or headers.get("Location")
+                if status not in (200, 204, 301, 302, 303, 307, 308) or not redirect:
+                    last_error = "Unexpected standard response via {0}: HTTP {1} {2}".format(label, status, reason)
+                    continue
+
+                parts = urlsplit(redirect)
+                if not parts.scheme or not parts.netloc:
+                    last_error = "Invalid standard redirect via {0}: {1}".format(label, redirect)
+                    continue
+
+                if not parts.path.startswith("/d/"):
+                    last_error = "Standard redirect points to a page, not a file, via {0}: {1}".format(label, redirect)
+                    continue
+
+                return redirect
+            except Exception as exc:
+                last_error = "{0} via {1}: {2}".format(type(exc).__name__, "proxy" if mode else "direct", exc)
+        time.sleep(0.5 * attempt)
+
+    for attempt in range(1, 6):
+        if attempt > 1:
+            token = fetch_download_token(file_id, use_proxy=use_proxy, site_host=site_host) or token
+        for mode in choose_proxy_modes(use_proxy):
+            try:
+                label = "proxy" if mode else "direct"
+                finish_line(
+                    "Fallback resolving file id: {0} [{1} alt try {2}]".format(file_id, label, attempt),
+                    Ansi.YELLOW if supports_color() else None,
                 )
                 status, reason, headers = request_download_redirect(file_id, True, token=token, use_proxy=mode, site_host=site_host)
                 redirect = headers.get("Hx-Redirect") or headers.get("Location")
@@ -1186,34 +1264,14 @@ def resolve_download_target(file_id, use_proxy=False, site_host=OFFICIAL_SITE_HO
                     last_error = "Advertisement redirect via {0}".format(label)
                     continue
 
+                if not parts.path.startswith("/d/"):
+                    last_error = "Redirect points to a page, not a file, via {0}: {1}".format(label, redirect)
+                    continue
+
                 return redirect
             except Exception as exc:
                 last_error = "{0} via {1}: {2}".format(type(exc).__name__, "proxy" if mode else "direct", exc)
         time.sleep(0.35 * attempt)
-
-    for attempt in range(1, 3):
-        for mode in choose_proxy_modes(use_proxy):
-            try:
-                label = "proxy" if mode else "direct"
-                finish_line(
-                    "Fallback resolving file id: {0} [{1} std try {2}]".format(file_id, label, attempt),
-                    Ansi.YELLOW if supports_color() else None,
-                )
-                status, reason, headers = request_download_redirect(file_id, False, token=token, use_proxy=mode, site_host=site_host)
-                redirect = headers.get("Hx-Redirect") or headers.get("Location")
-                if status not in (200, 204, 301, 302, 303, 307, 308) or not redirect:
-                    last_error = "Unexpected standard response via {0}: HTTP {1} {2}".format(label, status, reason)
-                    continue
-
-                parts = urlsplit(redirect)
-                if not parts.scheme or not parts.netloc:
-                    last_error = "Invalid standard redirect via {0}: {1}".format(label, redirect)
-                    continue
-
-                return redirect
-            except Exception as exc:
-                last_error = "{0} via {1}: {2}".format(type(exc).__name__, "proxy" if mode else "direct", exc)
-        time.sleep(0.5 * attempt)
 
     raise RuntimeError("Could not resolve downloadable URL for {0}. Last error: {1}".format(file_id, last_error))
 
@@ -1240,6 +1298,9 @@ def direct_url_metadata(redirect, use_proxy=False):
                 )
                 if response.status_code not in (200, 206):
                     last_error = "Unexpected metadata response via {0}: HTTP {1} {2}".format(label, response.status_code, response.reason)
+                    continue
+                if not response_is_downloadable(response):
+                    last_error = "Metadata response is a page, not a file via {0}".format(label)
                     continue
 
                 total = response.headers.get("Content-Length")
