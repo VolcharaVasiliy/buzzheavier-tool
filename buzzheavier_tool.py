@@ -109,6 +109,7 @@ UPLOAD_CHUNK_SIZE = 256 * 1024
 UPLOAD_MIN_PART_SIZE = 5 * 1024 * 1024
 UPLOAD_MAX_PART_SIZE = 100 * 1024 * 1024 * 1024
 UPLOAD_MAX_PARTS = 10000
+UPLOAD_AUTO_PART_SIZE_CAP = 100 * 1024 * 1024
 UPLOAD_MAX_FILE_SIZE = 1024 * 1024 * 1024 * 1024
 USER_AGENT = "Buzzheavier Tool"
 SPINNER_FRAMES = ["|", "/", "-", "\\"]
@@ -767,6 +768,9 @@ def resolve_upload_part_size(file_size, requested_size=None, requested_workers=N
     if requested_size is None:
         worker_target = max(1, int(requested_workers or 1))
         size = (file_size + worker_target - 1) // worker_target
+        # Keep auto-chosen parts small: the server rejects oversized parts
+        # with HTTP 413 (observed with 2 GiB parts), 100 MiB parts are safe.
+        size = min(size, UPLOAD_AUTO_PART_SIZE_CAP)
     else:
         size = parse_size_bytes(requested_size)
 
@@ -2088,6 +2092,7 @@ def upload_part_with_retries(
                     proxies=get_requests_proxies(mode),
                     timeout=(8, NETWORK_IO_TIMEOUT),
                     allow_redirects=False,
+                    stream=True,
                 )
                 if cancel_event.is_set():
                     raise DownloadCancelled("Upload cancelled by user.")
@@ -2226,6 +2231,7 @@ def upload_once_legacy(path, login_id=None, parent_id=None, location_id=None, no
                 proxies=get_requests_proxies(mode),
                 timeout=(8, NETWORK_IO_TIMEOUT),
                 allow_redirects=False,
+                stream=True,
             )
             if cancel_event.is_set():
                 raise DownloadCancelled("Upload cancelled by user.")
