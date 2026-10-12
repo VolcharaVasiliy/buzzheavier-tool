@@ -1,8 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.2.1
 
 - Fixed uploads broken by the `curl_cffi` switch: file-like upload bodies (multipart part reader and single-part reader) are now streamed via `content=`, because `curl_cffi` rejects them in `data=` with `TypeError: data must be dict/list/tuple, str, BytesIO or bytes`.
+- App icon switched to the first variant (hex-arrow).
 
 ## 0.2.0
 
