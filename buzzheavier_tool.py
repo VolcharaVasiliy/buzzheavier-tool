@@ -47,13 +47,19 @@ except ImportError:
 
 
 class HttpClient(object):
-    def __init__(self, backend, extra_kwargs, exception_types):
+    def __init__(self, backend, extra_kwargs, exception_types, stream_reader_kwarg=None):
         self.backend = backend
         self.extra_kwargs = extra_kwargs
         self.RequestException = exception_types
+        # curl_cffi accepts file-like request bodies only via `content=`
+        # (its `data=` takes dict/list/tuple/str/BytesIO/bytes), while plain
+        # requests streams file-like objects via `data=`.
+        self.stream_reader_kwarg = stream_reader_kwarg
 
     def request(self, method, url, **kwargs):
         kwargs = dict(self.extra_kwargs, **kwargs)
+        if self.stream_reader_kwarg and hasattr(kwargs.get("data"), "read"):
+            kwargs[self.stream_reader_kwarg] = kwargs.pop("data")
         response = self.backend.request(method, url, **kwargs)
         if not hasattr(response, "reason"):
             try:
@@ -82,7 +88,7 @@ if impersonating_requests is not None:
     _exception_types = (impersonating_requests.RequestsError,)
     if plain_requests is not None:
         _exception_types += (plain_requests.RequestException,)
-    requests = HttpClient(impersonating_requests.Session(impersonate="chrome"), {}, _exception_types)
+    requests = HttpClient(impersonating_requests.Session(impersonate="chrome"), {}, _exception_types, stream_reader_kwarg="content")
 elif plain_requests is not None:
     requests = HttpClient(plain_requests, {}, (plain_requests.RequestException,))
 else:
